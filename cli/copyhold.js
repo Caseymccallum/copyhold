@@ -181,7 +181,7 @@ async function convert(positional, flags) {
   }
   process.stdout.write(`verify: ${status}\n`);
 
-  return failed.length > 0 ? EXIT.BROKEN : EXIT.VERIFIED;
+  return failed.length > 0 ? EXIT.BROKEN : EXIT[status] ?? EXIT.VERIFIED;
 }
 
 async function checkConflictsVerb(positional, flags) {
