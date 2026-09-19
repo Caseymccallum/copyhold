@@ -1,0 +1,13 @@
+# Line endings. The files that run are the files in the repository, on every platform,
+# so text is LF here and a checkout does not rewrite it.
+* text=auto eol=lf
+
+# Never touched: these are bytes.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+
+# A committed fixture is bytes, not text. When the first adapter lands, mark its fixture
+# directory `-text` here. A checkout that rewrote a line ending inside a fixture would
+# change the fixture's digest, and a manifest records digests.
