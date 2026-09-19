@@ -138,3 +138,97 @@ test('a trust ledger that goes negative is flagged as needs_decision', async (t)
   assert.ok(negative[0].detail.includes('1001'));
   assert.ok(negative[0].detail.includes('negative'));
 });
+
+test('the converted package works with verify --sources', async (t) => {
+  const { root, backupPath, documentsDir, packageDir } = await makeFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await convertMyCase({ backupPath, documentsDir, packageDir });
+  const manifest = await buildManifest(packageDir, {
+    source: { system: 'mycase' }, inputs: [backupPath],
+  });
+  await writeFile(join(packageDir, MANIFEST_NAME), canonicalJson(manifest), 'utf8');
+
+  const { status } = await verifyPackage(packageDir, { sourcesDir: root });
+  assert.equal(status, STATUS.VERIFIED);
+});
+
+// ---- Scale ----
+
+const mulberry32 = (seed) => () => {
+  let t = (seed += 0x6d2b79f5);
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+
+const FIRST = ['Ana', 'Ben', 'Carlos', 'Dana', 'Elena', 'Frank', 'Grace', 'Hector', 'Iris', 'James', 'Katherine', 'Liam', 'Maria', 'Noah', 'Olivia'];
+const LAST = ['Silva', 'Okafor', 'Martinez', 'Chen', 'Nguyen', 'Patel', 'Garcia', 'Kim', 'Vasquez'];
+const COMPANIES = ['Acme Corp', 'Global Industries LLC', 'Pacific Trading Ltd', 'Meridian Group Inc', 'Sterling Partners'];
+const TYPES = ['Personal Injury', 'Family Law', 'Criminal Defense', 'Estate Planning', 'Contract Law'];
+
+test('a 50-matter export converts, reconciles, and verifies', async (t) => {
+  const rng = mulberry32(42);
+  const root = await mkdtemp(join(tmpdir(), 'copyhold-scale-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+
+  const caseRows = [];
+  for (let i = 1; i <= 50; i++) {
+    const num = String(1000 + i);
+    const client = rng() < 0.3 ? pick(COMPANIES) : `${pick(FIRST)} ${pick(LAST)}`;
+    caseRows.push(`${num},${client},${rng() < 0.8 ? 'Open' : 'Closed'},2026-01-15,${pick(TYPES)}`);
+  }
+  const contactRows = [];
+  for (let i = 0; i < 50; i++) {
+    const name = rng() < 0.3 ? pick(COMPANIES) : `${pick(FIRST)} ${pick(LAST)}`;
+    contactRows.push(`${name},${name.toLowerCase().replace(/[^a-z]/g, '.')}@example.com,555-${1000 + i}`);
+  }
+  const docRows = [];
+  const docMatterFor = {};
+  for (let i = 1; i <= 60; i++) {
+    const num = String(1000 + Math.ceil(i / 2));
+    docMatterFor[i] = num;
+    docRows.push(`${num},doc_${i}.pdf,2026-03-15`);
+  }
+  for (let i = 61; i <= 100; i++) {
+    docRows.push(`${1000 + 1 + Math.floor(rng() * 50)},absent_${i}.pdf,2026-04-15`);
+  }
+  const trustRows = [];
+  for (let i = 0; i < 30; i++) {
+    const num = 1000 + 1 + Math.floor(rng() * 10);
+    const type = rng() < 0.6 ? 'Deposit' : 'Disbursement';
+    const amount = type === 'Deposit' ? `$${500 + Math.floor(rng() * 2000)}.00` : `$${100 + Math.floor(rng() * 800)}.00`;
+    trustRows.push(`${num},2026-06-15,${amount},${type}`);
+  }
+  trustRows.push('1001,2026-06-01,$50000.00,Disbursement');
+
+  const backupPath = join(root, 'backup.zip');
+  await writeFile(backupPath, writeZip([
+    { name: 'Cases.csv', data: `Case Number,Client,Status,Date Opened,Case Type\r\n${caseRows.join('\r\n')}\r\n` },
+    { name: 'Clients.csv', data: `Name,Email,Phone\r\n${contactRows.join('\r\n')}\r\n` },
+    { name: 'Documents.csv', data: `Case Number,Name,Date Created\r\n${docRows.join('\r\n')}\r\n` },
+    { name: 'Trust Activity.csv', data: `Case Number,Date,Amount,Type\r\n${trustRows.join('\r\n')}\r\n` },
+  ]));
+
+  const documentsDir = join(root, 'docs');
+  for (let i = 1; i <= 60; i++) {
+    const dir = join(documentsDir, docMatterFor[i]);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `doc_${i}.pdf`), `content ${i}`);
+  }
+
+  const packageDir = join(root, 'package');
+  const { dispositions, documentCount } = await convertMyCase({ backupPath, documentsDir, packageDir });
+  const manifest = await buildManifest(packageDir, { source: { system: 'mycase' }, inputs: [backupPath] });
+  await writeFile(join(packageDir, MANIFEST_NAME), canonicalJson(manifest), 'utf8');
+  const { status } = await verifyPackage(packageDir, { sourcesDir: root });
+  assert.equal(status, STATUS.VERIFIED);
+
+  const imported = dispositions.filter((d) => d.kind === 'record_row' && d.state === 'imported');
+  assert.equal(imported.length, 50 + 50 + 100 + 31);
+  assert.equal(documentCount, 60);
+  assert.equal(dispositions.filter((d) => d.reason === 'LISTED_NOT_PRESENT').length, 40);
+  assert.ok(dispositions.filter((d) => d.reason === 'NEGATIVE_LEDGER').length > 0);
+  assert.ok(dispositions.filter((d) => d.reason === 'PRESERVED').length > 0);
+});

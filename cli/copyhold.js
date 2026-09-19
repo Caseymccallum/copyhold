@@ -167,7 +167,7 @@ async function convert(positional, flags) {
   process.stdout.write('wrote records/, documents/, disposition.csv, report.md\n');
 
   // Pack, so that `copyhold verify` works on the result without a second command.
-  const manifest = await buildManifest(packageDir, { source: { system: flags.source } });
+  const manifest = await buildManifest(packageDir, { source: { system: flags.source }, inputs: [backupPath] });
   await writeFile(join(packageDir, MANIFEST_NAME), canonicalJson(manifest), 'utf8');
   process.stdout.write(`wrote ${MANIFEST_NAME}\n`);
 
