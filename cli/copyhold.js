@@ -13,9 +13,19 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CAVEATS, MANIFEST_NAME, buildManifest, canonicalJson } from '../src/manifest.js';
 import { RESULT, STATUS, verifyPackage } from '../src/verify.js';
+import { buildConflictIndex, checkConflicts, writeConflictCheckCsv, writeEngagementCsv } from '../src/conflicts.js';
+import { parseCsv } from '../src/csv.js';
+import { readFileSync } from 'node:fs';
 import { convertMyCase } from '../src/adapters/mycase.js';
 
 const EXIT = { VERIFIED: 0, INCOMPLETE: 1, BROKEN: 2, USAGE: 64 };
+
+const HELP_END = `
+  copyhold check-conflicts <package-dir> --party "Acme Corp" [--party "John Smith"]
+      Check proposed party names against the package's contacts and matters.
+      Writes records/conflict_checks.csv and records/engagements.csv.
+      Produces candidates, never a verdict.
+`;
 
 const HELP = `copyhold — get a law firm's records out of its practice management software,
 and prove what came out.
@@ -39,7 +49,7 @@ Exit codes: 0 VERIFIED, 1 INCOMPLETE, 2 BROKEN, 64 usage.
 
 function takeFlags(argv) {
   const positional = [];
-  const flags = { source: 'unknown', inputs: [], sources: null, documents: null, json: false };
+  const flags = { source: 'unknown', inputs: [], sources: null, documents: null, parties: [], json: false };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -54,6 +64,9 @@ function takeFlags(argv) {
       i += 1;
     } else if (arg === '--documents') {
       flags.documents = argv[i + 1];
+      i += 1;
+    } else if (arg === '--party') {
+      flags.parties.push(argv[i + 1]);
       i += 1;
     } else if (arg === '--json') {
       flags.json = true;
@@ -171,6 +184,79 @@ async function convert(positional, flags) {
   return failed.length > 0 ? EXIT.BROKEN : EXIT.VERIFIED;
 }
 
+async function checkConflictsVerb(positional, flags) {
+  if (positional.length < 1) {
+    process.stderr.write('check-conflicts needs a package directory\n');
+    return EXIT.USAGE;
+  }
+  if (flags.parties.length === 0) {
+    process.stderr.write('check-conflicts needs at least one --party\n');
+    return EXIT.USAGE;
+  }
+  const packageDir = positional[0];
+
+  // Read the contacts and matters from the package
+  let contacts = null, matters = null, contactsMap = null, mattersMap = null;
+  try {
+    const contactsData = readFileSync(join(packageDir, 'records', 'contacts.csv'));
+    contacts = parseCsv(contactsData);
+    if (contacts.headers.length > 0) {
+      contactsMap = {};
+      contacts.headers.forEach((h, i) => {
+        const n = h.toLowerCase().replace(/[\s_-]+/g, ' ').trim();
+        if (n === 'name') contactsMap.name = i;
+      });
+    }
+  } catch { /* contacts.csv absent */ }
+
+  try {
+    const mattersData = readFileSync(join(packageDir, 'records', 'matters.csv'));
+    matters = parseCsv(mattersData);
+    if (matters.headers.length > 0) {
+      mattersMap = {};
+      matters.headers.forEach((h, i) => {
+        const n = h.toLowerCase().replace(/[\s_-]+/g, ' ').trim();
+        if (n === 'client') mattersMap.client = i;
+        if (n === 'matter number') mattersMap.matter_number = i;
+      });
+    }
+  } catch { /* matters.csv absent */ }
+
+  if (contactsMap === null && mattersMap === null) {
+    process.stderr.write('the package has no contacts.csv or matters.csv to check against\n');
+    return EXIT.USAGE;
+  }
+
+  const index = buildConflictIndex({ contacts, matters, contactsMap, mattersMap });
+  const results = checkConflicts(index, flags.parties);
+
+  const searchedAt = new Date().toISOString();
+  const searchedBy = 'copyhold';
+
+  const checkCsv = writeConflictCheckCsv(results, {
+    searchedAt, searchedBy, parties: flags.parties, resolution: 'pending', resolvedBy: '',
+  });
+  await writeFile(join(packageDir, 'records', 'conflict_checks.csv'), checkCsv, 'utf8');
+
+  const engagementCsv = writeEngagementCsv({
+    searchedAt, searchedBy, parties: flags.parties,
+    decision: 'pending', decisionReason: 'candidates surfaced, awaiting review',
+    matterNumber: '',
+  });
+  await writeFile(join(packageDir, 'records', 'engagements.csv'), engagementCsv, 'utf8');
+
+  for (const r of results) {
+    process.stdout.write(`CANDIDATE  ${r.proposed}  matches  ${r.matched}  (${r.basis}, ${r.source}${r.ref ? ` ref ${r.ref}` : ''})\n`);
+  }
+  if (results.length === 0) {
+    process.stdout.write(`NO CANDIDATES for ${flags.parties.join(', ')} — the check is recorded, and a lawyer decides\n`);
+  }
+  process.stdout.write(`wrote records/conflict_checks.csv and records/engagements.csv\n`);
+  process.stdout.write('the tool surfaces candidates; a lawyer decides\n');
+
+  return results.length > 0 ? EXIT.INCOMPLETE : EXIT.VERIFIED;
+}
+
 async function main() {
   const [verb, ...rest] = process.argv.slice(2);
   const { positional, flags } = takeFlags(rest);
@@ -182,8 +268,9 @@ async function main() {
   if (verb === 'convert') return convert(positional, flags);
   if (verb === 'pack') return pack(positional, flags);
   if (verb === 'verify') return verify(positional, flags);
+  if (verb === 'check-conflicts') return checkConflictsVerb(positional, flags);
 
-  process.stderr.write(`unknown verb: ${verb}\n\n${HELP}`);
+  process.stderr.write(`unknown verb: ${verb}\n\n${HELP}\n${HELP_END}`);
   return EXIT.USAGE;
 }
 
