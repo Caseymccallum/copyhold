@@ -7,7 +7,7 @@
  * without trusting the tool that made it.
  */
 
-export { countCsv, decodeUtf8 } from './src/csv.js';
+export { countCsv, csvEscape, csvRow, decodeUtf8, parseCsv } from './src/csv.js';
 
 export {
   ALLOWED_UNLISTED,
@@ -24,4 +24,8 @@ export {
   walk,
 } from './src/manifest.js';
 
+export { crc32, readZip, writeZip } from './src/zip.js';
+
 export { RESULT, STATUS, verifyPackage } from './src/verify.js';
+
+export { SOURCE_NAME, convertMyCase } from './src/adapters/mycase.js';

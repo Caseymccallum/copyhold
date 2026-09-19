@@ -13,11 +13,16 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CAVEATS, MANIFEST_NAME, buildManifest, canonicalJson } from '../src/manifest.js';
 import { RESULT, STATUS, verifyPackage } from '../src/verify.js';
+import { convertMyCase } from '../src/adapters/mycase.js';
 
 const EXIT = { VERIFIED: 0, INCOMPLETE: 1, BROKEN: 2, USAGE: 64 };
 
 const HELP = `copyhold — get a law firm's records out of its practice management software,
 and prove what came out.
+
+  copyhold convert --source mycase <backup.zip> [--documents <dir>] <package-dir>
+      Read a MyCase Full Backup and write a package: records/, documents/,
+      disposition.csv, report.md. Then packs it.
 
   copyhold pack   <package-dir> [--source <system>] [--input <file>]...
       Write ${MANIFEST_NAME} for a package directory. The directory must hold
@@ -34,7 +39,7 @@ Exit codes: 0 VERIFIED, 1 INCOMPLETE, 2 BROKEN, 64 usage.
 
 function takeFlags(argv) {
   const positional = [];
-  const flags = { source: 'unknown', inputs: [], sources: null, json: false };
+  const flags = { source: 'unknown', inputs: [], sources: null, documents: null, json: false };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -46,6 +51,9 @@ function takeFlags(argv) {
       i += 1;
     } else if (arg === '--sources') {
       flags.sources = argv[i + 1];
+      i += 1;
+    } else if (arg === '--documents') {
+      flags.documents = argv[i + 1];
       i += 1;
     } else if (arg === '--json') {
       flags.json = true;
@@ -125,6 +133,34 @@ async function verify(positional, flags) {
   return EXIT[status];
 }
 
+async function convert(positional, flags) {
+  if (positional.length < 2) {
+    process.stderr.write('convert needs a backup ZIP and a package directory\n');
+    return EXIT.USAGE;
+  }
+  const [backupPath, packageDir] = positional;
+
+  const result = await convertMyCase({
+    backupPath,
+    documentsDir: flags.documents,
+    packageDir,
+  });
+
+  const imported = result.dispositions.filter((d) => d.state === 'imported').length;
+  const needsDecision = result.dispositions.filter((d) => d.state === 'needs_decision').length;
+  process.stdout.write(
+    `converted: ${imported} row(s) imported, ${needsDecision} item(s) need a decision, ${result.documentCount} document(s) matched\n`,
+  );
+  process.stdout.write('wrote records/, documents/, disposition.csv, report.md\n');
+
+  // Pack, so that `copyhold verify` works on the result without a second command.
+  const manifest = await buildManifest(packageDir, { source: { system: flags.source } });
+  await writeFile(join(packageDir, MANIFEST_NAME), canonicalJson(manifest), 'utf8');
+  process.stdout.write(`wrote ${MANIFEST_NAME}\n`);
+
+  return EXIT.VERIFIED;
+}
+
 async function main() {
   const [verb, ...rest] = process.argv.slice(2);
   const { positional, flags } = takeFlags(rest);
@@ -133,6 +169,7 @@ async function main() {
     process.stdout.write(HELP);
     return EXIT.USAGE;
   }
+  if (verb === 'convert') return convert(positional, flags);
   if (verb === 'pack') return pack(positional, flags);
   if (verb === 'verify') return verify(positional, flags);
 
