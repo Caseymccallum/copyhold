@@ -1,0 +1,28 @@
+{
+  "name": "copyhold",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Get a law firm's records out of its practice management software, and prove what came out.",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "bin": {
+    "copyhold": "./cli/copyhold.js"
+  },
+  "files": [
+    "index.js",
+    "cli/",
+    "src/",
+    "SPEC.md"
+  ],
+  "scripts": {
+    "start": "node cli/copyhold.js",
+    "test": "node --test",
+    "verify": "node cli/copyhold.js verify",
+    "pack": "node cli/copyhold.js pack"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
