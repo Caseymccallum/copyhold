@@ -158,7 +158,17 @@ async function convert(positional, flags) {
   await writeFile(join(packageDir, MANIFEST_NAME), canonicalJson(manifest), 'utf8');
   process.stdout.write(`wrote ${MANIFEST_NAME}\n`);
 
-  return EXIT.VERIFIED;
+  // Verify immediately, so one command does the whole job and the firm sees the verdict.
+  const { status, checks } = await verifyPackage(packageDir);
+  const failed = checks.filter((c) => c.result === 'FAIL');
+  for (const check of checks) {
+    if (check.result !== 'PASS') {
+      process.stdout.write(`${check.result.padEnd(12)} ${check.id.padEnd(24)} ${check.reason}\n`);
+    }
+  }
+  process.stdout.write(`verify: ${status}\n`);
+
+  return failed.length > 0 ? EXIT.BROKEN : EXIT.VERIFIED;
 }
 
 async function main() {

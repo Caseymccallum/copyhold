@@ -20,7 +20,8 @@ function buildFixtureZip() {
     + '1001,medical_records.pdf,2026-01-20,Evidence\n'
     + '1002,will_original.pdf,2026-02-20,Originals\n';
   const trust = 'Case Number,Date,Amount,Type,Memo\n'
-    + '1001,2026-01-20,2500.00,Deposit,Retainer received\n';
+    + '1001,2026-01-20,2500.00,Deposit,Retainer received\n'
+    + '1001,2026-02-01,500.00,Disbursement,Filing fee paid\n';
   const unknown = 'SomeColumn,Another\nvalue1,value2\n';
 
   return writeZip([
@@ -64,7 +65,7 @@ test('rows in equals rows out: every source row is accounted for', async (t) => 
 
   // 2 cases + 2 clients + 3 document rows + 1 trust row = 8 record rows
   const imported = dispositions.filter((d) => d.kind === 'record_row' && d.state === 'imported');
-  assert.equal(imported.length, 8);
+  assert.equal(imported.length, 9);
 
   // 3 documents listed, 2 matched, 1 listed-but-absent
   const docRows = dispositions.filter((d) => d.kind === 'document');
@@ -105,11 +106,35 @@ test('a missing source file is needs_decision, not silence', async (t) => {
   assert.ok(missing.every((d) => d.state === 'needs_decision'));
 });
 
-test('an unrecognised ZIP entry is tracked, not silently dropped', async (t) => {
+test('the trust ledger reconciles, and the reconciliation CSV exists', async (t) => {
   const { root, backupPath, documentsDir, packageDir } = await makeFixture();
   t.after(() => rm(root, { recursive: true, force: true }));
 
+  await convertMyCase({ backupPath, documentsDir, packageDir });
+
+  const reconCsv = await readFile(join(packageDir, 'records', 'trust_reconciliation.csv'), 'utf8');
+  const lines = reconCsv.split('\r\n').filter((l) => l !== '');
+  assert.equal(lines.length, 2); // header + 1 matter
+  assert.ok(lines[1].includes('1001'), 'matter 1001 must be in the reconciliation');
+  assert.ok(lines[1].includes('2000.00'), 'balance should be 2500 - 500 = 2000');
+  assert.ok(lines[1].includes('no'), 'a positive ledger is not overdrawn');
+});
+
+test('a trust ledger that goes negative is flagged as needs_decision', async (t) => {
+  const { root, backupPath, documentsDir, packageDir } = await makeFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  // Overwrite the backup with one that overdraws matter 1001
+  const overdrawn = writeZip([
+    { name: 'Cases.csv', data: 'Case Number,Case Name,Status\n1001,Smith v Jones,Open\n' },
+    { name: 'Trust Activity.csv', data: 'Case Number,Date,Amount,Type\n1001,2026-01-20,500.00,Deposit\n1001,2026-01-25,1000.00,Disbursement\n' },
+  ]);
+  await writeFile(backupPath, overdrawn);
+
   const { dispositions } = await convertMyCase({ backupPath, documentsDir, packageDir });
-  const unexpected = dispositions.filter((d) => d.reason === 'UNRECOGNISED_FILE');
-  assert.ok(unexpected.length > 0, 'the unknown CSV must be tracked');
+  const negative = dispositions.filter((d) => d.reason === 'NEGATIVE_LEDGER');
+  assert.equal(negative.length, 1);
+  assert.equal(negative[0].state, 'needs_decision');
+  assert.ok(negative[0].detail.includes('1001'));
+  assert.ok(negative[0].detail.includes('negative'));
 });

@@ -25,6 +25,7 @@
 import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { csvEscape, csvRow, decodeUtf8, parseCsv } from '../csv.js';
+import { reconcileTrust, writeTrustReconciliationCsv } from '../trust.js';
 import { readZip } from '../zip.js';
 
 export const SOURCE_NAME = 'mycase';
@@ -196,12 +197,29 @@ function writeReportMarkdown({ dispositions }) {
   const counts = {};
   for (const d of dispositions) counts[d.state] = (counts[d.state] ?? 0) + 1;
 
-  let md = '# Copyhold conversion report\n\nSource: MyCase Full Backup.\n\n';
-  md += '| State | Count |\n| --- | --- |\n';
-  for (const state of ['imported', 'skipped', 'needs_decision']) {
-    md += `| ${state} | ${counts[state] ?? 0} |\n`;
+  // Per-entity summary, so a firm sees the shape of what arrived before opening a file.
+  const byEntity = {};
+  for (const d of dispositions) {
+    if (!byEntity[d.entity]) byEntity[d.entity] = { imported: 0, skipped: 0, needs_decision: 0 };
+    byEntity[d.entity][d.state] = (byEntity[d.entity][d.state] ?? 0) + 1;
   }
-  md += '\nEvery source row is accounted for below. **Nothing is silently dropped.**\n\n';
+
+  let md = '# Copyhold conversion report\n\nSource: MyCase Full Backup.\n\n';
+  md += '## Summary\n\n';
+  md += `Total dispositions: ${dispositions.length}\n\n`;
+  for (const state of ['imported', 'skipped', 'needs_decision']) {
+    md += `- **${state}**: ${counts[state] ?? 0}\n`;
+  }
+
+  md += '\n## Per entity\n\n';
+  md += '| Entity | Imported | Skipped | Needs decision |\n| --- | --- | --- | --- |\n';
+  for (const entity of Object.keys(byEntity).sort()) {
+    const e = byEntity[entity];
+    md += `| ${entity} | ${e.imported} | ${e.skipped} | ${e.needs_decision} |\n`;
+  }
+
+  md += '\n## Every disposition\n\n';
+  md += 'Nothing is silently dropped.\n\n';
   md += '| Kind | Entity | Ref | State | Reason | Detail |\n| --- | --- | --- | --- | --- | --- |\n';
   for (const d of dispositions) {
     md += `| ${d.kind} | ${d.entity} | ${d.ref} | ${d.state} | ${d.reason} | ${d.detail ?? ''} |\n`;
@@ -280,6 +298,51 @@ export async function convertMyCase({ backupPath, documentsDir = null, packageDi
       const ref = columnMap.matter_number !== undefined
         ? (rows[i][columnMap.matter_number] || `row ${i + 1}`) : `row ${i + 1}`;
       track(dispositions, 'record_row', spec.entity, ref, 'imported', 'MAPPED', null);
+    }
+  }
+
+  // ---- Trust ledger reconciliation ----
+  // The one thing no open-source competitor has, and the thing TrustBooks charges
+  // $59/month for. The adapter computes per-matter balances and flags a negative
+  // ledger, because the alternative is a firm that believes its trust account is
+  // fine when it is not.
+
+  const trustEntry = matched.get('trust activity');
+  let trustReconciliation = null;
+
+  if (trustEntry) {
+    const parsed = parseCsv(trustEntry.data);
+    if (parsed && parsed.rows.length > 0) {
+      const trustMap = mapColumns(parsed.headers, CANDIDATES.trust_transactions);
+      if (trustMap.columnMap.matter_number !== undefined && trustMap.columnMap.amount !== undefined) {
+        trustReconciliation = reconcileTrust(parsed.rows, {
+          matterIdx: trustMap.columnMap.matter_number,
+          amountIdx: trustMap.columnMap.amount,
+          directionIdx: trustMap.columnMap.direction ?? null,
+        });
+
+        const trustCsv = writeTrustReconciliationCsv(trustReconciliation.perMatter);
+        await writeFile(join(packageDir, 'records', 'trust_reconciliation.csv'), trustCsv, 'utf8');
+        recordFiles.push(join(packageDir, 'records', 'trust_reconciliation.csv'));
+
+        for (const m of trustReconciliation.perMatter) {
+          if (m.hasNegative) {
+            track(dispositions, 'trust_ledger', 'trust_transactions', m.matter, 'needs_decision', 'NEGATIVE_LEDGER',
+              `the running balance for matter ${m.matter} goes negative at transaction ${m.negativeAt}`);
+          }
+        }
+        if (trustReconciliation.unparsedAmounts > 0) {
+          track(dispositions, 'trust_ledger', 'trust_transactions', '(amounts)', 'needs_decision', 'UNPARSED_AMOUNT',
+            `${trustReconciliation.unparsedAmounts} amount(s) could not be parsed`);
+        }
+        if (trustReconciliation.unmatchedDirections > 0) {
+          track(dispositions, 'trust_ledger', 'trust_transactions', '(directions)', 'needs_decision', 'UNMATCHED_DIRECTION',
+            `${trustReconciliation.unmatchedDirections} direction(s) matched no deposit or disbursement label`);
+        }
+      } else {
+        track(dispositions, 'trust_ledger', 'trust_transactions', '(all)', 'needs_decision', 'NO_COLUMN_MAP',
+          'the trust CSV was found but its columns could not be mapped to matter/amount');
+      }
     }
   }
 
